@@ -1,0 +1,6 @@
+# wrangler's local cache/build output (account id, bundles)
+.wrangler/
+node_modules/
+# local-dev secrets, if ever created: never commit
+.dev.vars*
+.env*

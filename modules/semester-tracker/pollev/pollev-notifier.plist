@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Starts the PollEv notifier 5 minutes before each lecture (example: 12pm and 3pm, Mon/Wed/Fri; edit the times).
+     It exits on its own when the lecture ends. Watches only; never answers polls.
+     Install: cp this file to {{HOME}}/Library/LaunchAgents/, then
+     launchctl bootstrap gui/$(id -u) {{HOME}}/Library/LaunchAgents/{{LABEL_PREFIX}}.pollev-notifier.plist
+     Remove:  launchctl bootout gui/$(id -u)/{{LABEL_PREFIX}}.pollev-notifier and delete the copy. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{{LABEL_PREFIX}}.pollev-notifier</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/python3</string>
+    <string>{{HOME}}/semester-tracker/pollev/notifier.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string></dict>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>11</integer><key>Minute</key><integer>55</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>11</integer><key>Minute</key><integer>55</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>11</integer><key>Minute</key><integer>55</integer></dict>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>55</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>55</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>14</integer><key>Minute</key><integer>55</integer></dict>
+  </array>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>{{HOME}}/Library/Logs/pollev-notifier.log</string>
+  <key>StandardErrorPath</key><string>{{HOME}}/Library/Logs/pollev-notifier.log</string>
+</dict>
+</plist>

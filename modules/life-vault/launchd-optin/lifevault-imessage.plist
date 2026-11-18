@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- OPT-IN. Nightly lv-imessage: feeds new messages YOU sent in Messages (reads chat.db; needs Full Disk Access for /usr/bin/python3) into the vault's evidence spool.
+     Read modules/life-vault/README.md "Privacy" before loading it. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{{LABEL_PREFIX}}.lifevault.imessage</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/bin/python3</string><string>{{HOME}}/life/tools/bin/lv-imessage</string></array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>{{HOME}}</string>
+    <key>LIFE_VAULT</key><string>{{HOME}}/life</string>
+    <key>LIFEVAULT_NO_CAPTURE</key><string>1</string>
+    <key>PATH</key><string>{{HOME}}/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>50</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>Nice</key><integer>5</integer>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>{{HOME}}/Library/Logs/lifevault-imessage.log</string>
+  <key>StandardErrorPath</key><string>{{HOME}}/Library/Logs/lifevault-imessage.log</string>
+</dict>
+</plist>

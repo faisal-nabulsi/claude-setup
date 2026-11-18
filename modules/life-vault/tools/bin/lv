@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+# tools/bin/lv
+"""Life vault CLI: add, find, reindex."""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from lifevault.entities import Entities          # noqa: E402
+from lifevault.entry import Entry                # noqa: E402
+from lifevault.index import SEARCH_DIRS, rebuild, tag_filename  # noqa: E402
+from lifevault.resolve import NoSuchConflict, contested, resolve  # noqa: E402
+from lifevault.store import append_entry         # noqa: E402
+from lifevault.tags import load_vocab, validate_tags  # noqa: E402
+from lifevault.vaultlock import (                # noqa: E402
+    DEFAULT_TIMEOUT, VaultLockError, vault_lock,
+)
+
+# How long to wait for another writer before giving up, overridable so that a
+# batched backfill can fail fast and requeue instead of queueing 200 agents
+# behind one slow log rewrite.
+LOCK_TIMEOUT_ENV = "LIFE_VAULT_LOCK_TIMEOUT"
+
+
+def vault_root() -> Path:
+    return Path(os.environ.get("LIFE_VAULT", Path.home() / "life"))
+
+
+def lock_timeout() -> float:
+    raw = os.environ.get(LOCK_TIMEOUT_ENV)
+    if raw is None:
+        return DEFAULT_TIMEOUT
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(
+            f"{LOCK_TIMEOUT_ENV} must be a number of seconds, not {raw!r}"
+        ) from None
+
+
+def cmd_add(args) -> int:
+    vault = vault_root()
+    tags = args.tags.split()
+    # Validated before the lock is taken: this is a pure rejection of the
+    # caller's own input, so it must not queue behind another writer, and it
+    # must keep returning 1 rather than becoming a lock timeout.
+    errors = validate_tags(tags, load_vocab(vault / "_index" / "tags.tsv"))
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        return 1
+
+    entities_file = vault / "_index" / "entities.tsv"
+
+    # One lock across the WHOLE sequence -- load, mint, append, save -- not
+    # around each step. `entities.tsv` is loaded here, edited in memory by
+    # mint(), and written back at the end; two `lv add` runs that overlap
+    # anywhere in that span each save their own version of the table and the
+    # second wins. Both exit 0, both logs are on disk, and one alias row is
+    # gone, so a fact survives as a file that no name resolves to. That table is
+    # the one file under _index/ that `index.rebuild()` cannot regenerate
+    # (spec §8's "the indexes are disposable" does not cover it), so the row is
+    # not recoverable -- one person becomes several files.
+    #
+    # The nested acquisition inside append_entry is free: the lock is
+    # re-entrant and counts depth rather than re-locking.
+    with vault_lock(vault, timeout=lock_timeout()):
+        entities = Entities.load(entities_file)
+        slug = entities.mint(args.entity, args.kind)
+        path = entities.rows[slug][0]
+        if not path.startswith(f"{args.kind}/"):
+            print(f"note: {args.entity!r} already exists at {path}; --kind {args.kind} ignored",
+                  file=sys.stderr)
+
+        entry = Entry(date=args.date, title=args.title, subject=args.subject,
+                      status="current", tags=tags, source=args.source, body=args.body,
+                      quote=args.quote)
+
+        # Write the log BEFORE registering the entity. The other order leaves
+        # entities.tsv pointing at a log that was never created. Under the lock
+        # the window between the two is invisible to every other writer.
+        verdict = append_entry(vault / path / "log.md", entry, vault)
+        entities.save(entities_file)
+
+    # Reported outside the lock: a consumer that has stopped reading this pipe
+    # would otherwise block every other writer in the vault behind it.
+    print(f"{verdict}\t{path}/log.md#{args.date}")
+    return 0
+
+
+def cmd_resolve(args) -> int:
+    """Say which of several disputed claims about a subject is the true one.
+
+    Listing and deciding are one command on purpose. The index passed to
+    --keep only means anything against a specific listing, so printing the
+    options from a separate invocation would invite a user to choose against a
+    listing that a capture run has since changed underneath them. `resolve`
+    re-derives the list under the lock and would rather raise than act on a
+    stale index.
+    """
+    vault = vault_root()
+    entities = Entities.load(vault / "_index" / "entities.tsv")
+    slug = entities.resolve(args.entity)
+    if slug is None:
+        print(f"no entity matches {args.entity!r}", file=sys.stderr)
+        return 1
+    log = vault / entities.rows[slug][0] / "log.md"
+
+    try:
+        options = contested(log, vault, args.subject)
+    except NoSuchConflict as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if not options:
+        print(f"nothing about {args.subject!r} is in dispute", file=sys.stderr)
+        return 1
+
+    if args.keep is None:
+        print(f"{len(options)} claims about {args.subject!r} — pass --keep N:\n")
+        for i, e in enumerate(options):
+            print(f"  [{i}] {e.date}  {e.title}\n"
+                  f"      {e.body.strip()[:160]}\n"
+                  f"      source: {e.source}\n")
+        return 1
+
+    try:
+        kept = resolve(log, vault, args.subject, keep=args.keep)
+    except (NoSuchConflict, IndexError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    print(f"current\t{entities.rows[slug][0]}/log.md#{kept.date}\t{kept.title}")
+    return 0
+
+
+def cmd_find(args) -> int:
+    tag_dir = vault_root() / "_index" / "tags"
+    sets = []
+    for tag in args.tags:
+        path = tag_dir / tag_filename(tag)
+        sets.append(set(path.read_text(encoding="utf-8").split()) if path.exists() else set())
+    result = set.intersection(*sets) if sets else set()
+    for line in sorted(result):
+        print(line)
+    return 0
+
+
+def cmd_reindex(_args) -> int:
+    counts = rebuild(vault_root())
+    print(f"indexed {sum(counts.values())} postings across {len(counts)} tags")
+    return 0
+
+
+def cmd_scrub(args) -> int:
+    from lifevault.capture import harvest as harvest_mod
+    vault = vault_root()
+    removed = harvest_mod.scrub(vault, args.session, args.uuid)
+    if not removed:
+        print(f"no record {args.uuid} in session {args.session}", file=sys.stderr)
+        return 1
+    print(f"removed {removed} record(s); logged in "
+          f"sources/claude-code/scrubbed.tsv")
+    print("If that value was already committed, git history must be rewritten "
+          "separately — `git log -S<value>` finds the commits, and this vault "
+          "has no remote, so a rebase is safe.")
+    return 0
+
+
+def cmd_review(args) -> int:
+    """The other half of the nightly sweep: reading _review/INBOX.md back.
+
+    `lv-sweep` parks proposals it is not confident enough to file and renders
+    them as checkboxes. Until this existed, ticking one did nothing, so the
+    capture loop could not close.
+
+    Exit codes follow the same rule as the rest of this CLI. A refusal is exit
+    1 and is a promise, not a complaint: `review.apply` raises `ReviewRefused`
+    only from the stretch of code that runs before its first write, so exit 1
+    here means the inbox was rejected and NOTHING was decided, filed, archived
+    or rewritten. A proposal that was approved but could not be filed is not
+    that case -- other proposals in the same run were written -- so it is
+    reported on stderr and in the summary, and leaves the run at exit 0.
+    """
+    from lifevault import review
+
+    vault = vault_root()
+    if args.reject:
+        if not review.reject(vault, args.reject):
+            print(f"lv review: no pending proposal {args.reject}; "
+                  "`lv review --list` shows the ids", file=sys.stderr)
+            return 1
+        print(f"rejected\t{args.reject}")
+        return 0
+
+    if args.apply:
+        try:
+            results = review.apply(vault, kind=args.kind)
+        except review.ReviewRefused as exc:
+            print(f"lv review: refusing to apply: {exc}", file=sys.stderr)
+            return 1
+        print("\t".join(f"{name} {count}" for name, count in sorted(results.items())))
+        if results["failed"]:
+            print("`lv review --list` shows why", file=sys.stderr)
+        return 0
+
+    if args.list:
+        print(review.format_list(vault), end="")
+        return 0
+
+    # Nothing was asked for. Rejected input, and stdout stays empty so a
+    # caller piping this never mistakes a usage error for an empty inbox.
+    print("lv review: choose one of --list, --apply, --reject <id>",
+          file=sys.stderr)
+    return 1
+
+
+def cmd_health(args) -> int:
+    """Is capture actually working today?
+
+    The exit code is the interface, so that a monitoring script needs to parse
+    nothing: 0 everything is ok, 1 something is stale or broken, 2 a check
+    could not be measured at all. 2 is never collapsed into 0 -- "I could not
+    tell" must not be spelled the same way as "fine", because a health check
+    that reports OK on a dead system is worse than no health check.
+
+    Read-only with respect to everything it inspects. It never writes
+    ~/.claude/settings.json and never writes ~/Library/LaunchAgents; the only
+    thing it writes is the vault's own _health/ directory.
+    """
+    from lifevault import health
+
+    vault = vault_root()
+    report = health.check(vault)
+    # Written on every run, including a clean one: BANNER.md is empty exactly
+    # when the system is well, so a fault that clears must not leave a stale
+    # warning behind, and a fault that appears must not wait for anyone to look.
+    health.write_banner(vault, report)
+    if args.json:
+        import json
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        print(report.summary(), end="")
+    return report.exit_code
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="lv")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    add = sub.add_parser("add")
+    for flag in ("entity", "date", "title", "subject", "tags", "source", "body"):
+        add.add_argument(f"--{flag}", required=True)
+    # Spec §12.1: a span copied verbatim from the source, so a fabricated fact
+    # is caught by string search rather than judgement. Optional, not required:
+    # a fact synthesized across several messages legitimately has no single
+    # span to quote, and §12.1 caps those at conf/derived rather than banning
+    # them. Requiring the flag here would push extractors to invent one.
+    add.add_argument("--quote", default=None)
+    # Restricted to the directories reindex actually scans. An unlisted kind
+    # would write a log that `find` could never see again.
+    add.add_argument("--kind", required=True, choices=SEARCH_DIRS)
+    add.set_defaults(func=cmd_add)
+
+    find = sub.add_parser("find")
+    find.add_argument("tags", nargs="+")
+    find.set_defaults(func=cmd_find)
+
+    rs = sub.add_parser("resolve",
+                        help="say which of several disputed claims is the true one")
+    rs.add_argument("--entity", required=True)
+    rs.add_argument("--subject", required=True)
+    rs.add_argument("--keep", type=int, default=None,
+                    help="index from the listing; omit to see the options")
+    rs.set_defaults(func=cmd_resolve)
+
+    sub.add_parser("reindex").set_defaults(func=cmd_reindex)
+
+    hp = sub.add_parser("health", help="is capture actually working today?")
+    hp.add_argument("--json", action="store_true",
+                    help="machine-readable report on stdout")
+    hp.set_defaults(func=cmd_health)
+
+    rv = sub.add_parser("review", help="accept or reject what the sweep proposed")
+    rv.add_argument("--list", action="store_true", help="what is pending")
+    rv.add_argument("--apply", action="store_true",
+                    help="file every ticked proposal in _review/INBOX.md")
+    rv.add_argument("--reject", metavar="ID",
+                    help="never propose this claim again")
+    # Only consulted for a proposal lv-sweep parked with no kind at all, which
+    # is what `unresolved-entity` means. Restricted to the directories reindex
+    # scans, exactly as `add` is.
+    rv.add_argument("--kind", choices=SEARCH_DIRS, default=None,
+                    help="vault directory for a proposal about a new entity")
+    rv.set_defaults(func=cmd_review)
+
+    sc = sub.add_parser("scrub")
+    sc.add_argument("--session", required=True)
+    sc.add_argument("--uuid", required=True)
+    sc.set_defaults(func=cmd_scrub)
+
+    args = parser.parse_args()
+    try:
+        return args.func(args)
+    except (ValueError, OSError, VaultLockError) as exc:
+        # Exit 1 means "your input was rejected, nothing was written".
+        # Exit 2 means "something went wrong mid-operation" — a caller must be
+        # able to tell those apart before retrying.
+        #
+        # VaultLockError is named explicitly because it is deliberately NOT an
+        # OSError: "this write was never serialized" must not be catchable by
+        # anything reaching for a file error. Left out, an uncaught
+        # VaultLockTimeout exits with Python's default status of 1 — which reads
+        # as "your input was rejected", so a backfill agent would discard work
+        # that a retry would have written. A timeout belongs on the exit-2 side:
+        # the input was fine and the operation may well succeed next time.
+        print(f"lv: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

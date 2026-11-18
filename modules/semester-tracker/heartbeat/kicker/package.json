@@ -1,0 +1,11 @@
+{
+  "name": "heartbeat-kicker",
+  "private": true,
+  "type": "module",
+  "description": "Cron that kicks the heartbeat workflow + GET /todo phone glance (see GLANCE.md)",
+  "scripts": {
+    "test": "node --test",
+    "check": "node --test && wrangler deploy --dry-run",
+    "deploy": "node --test && wrangler deploy --dry-run && wrangler deploy"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "id": "canvas-posted",
+  "note": "Push me when something new is posted on Canvas in my classes (announcements, assignments, module items, pages, new links on watched pages).",
+  "enabled": true,
+  "mode": "dry_run",
+  "every_minutes": 10,
+  "source": {
+    "kind": "canvas_posted",
+    "courses": {
+      "1234567": "CS 101",
+      "2345678": "BIO 101"
+    },
+    "watch_pages": [],
+    "skip_name_regex": {}
+  },
+  "action": {
+    "kind": "push",
+    "title": "Canvas"
+  }
+}

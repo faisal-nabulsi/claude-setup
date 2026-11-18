@@ -1,0 +1,16 @@
+{
+  "timezone": "America/New_York",
+  "term_end": "2026-12-18",
+  "last_instruction": "2026-12-04",
+  "holidays": ["2026-09-07", "2026-11-26", "2026-11-27"],
+  "canvas_host": "canvas.example.edu",
+  "canvas_courses": {"1234567": "CS 101", "2345678": "BIO 101"},
+  "push_title": "Semester",
+  "classes_by_weekday": {
+    "0": "CS 101 10am, BIO 101 1pm",
+    "1": "CS 101 lab 2pm",
+    "2": "CS 101 10am, BIO 101 1pm",
+    "3": "no classes",
+    "4": "CS 101 10am"
+  }
+}

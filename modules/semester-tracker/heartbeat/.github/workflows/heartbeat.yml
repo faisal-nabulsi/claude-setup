@@ -1,0 +1,38 @@
+name: heartbeat
+on:
+  schedule:
+    # Every 30 min, except 1am–6am PT (09:00–13:59 UTC) when nothing is ever due.
+    # GitHub cron is UTC and best-effort (runs can be minutes late or occasionally
+    # skipped) — state.json dedupe makes that harmless.
+    - cron: "7,37 0-8,14-23 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: heartbeat
+  cancel-in-progress: false
+
+jobs:
+  beat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run heartbeat
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          CANVAS_TOKEN: ${{ secrets.CANVAS_TOKEN }}
+        run: python3 heartbeat.py
+
+      - name: Persist state
+        run: |
+          git config user.name "heartbeat"
+          git config user.email "actions@users.noreply.github.com"
+          git add state.json deadlines.json reconcile.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "heartbeat state"
+          git pull --rebase origin main || true
+          git push

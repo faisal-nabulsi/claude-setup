@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Assignment watcher. Example schedule: Mon/Wed/Fri 12:58 (loops every 90 s until 13:45),
+     plus a single check at 17:00 and 21:00 every day. Edit the times to match your lectures.
+     The installer fills in {{HOME}} and {{LABEL_PREFIX}}, copies this to ~/Library/LaunchAgents/ and runs
+     launchctl bootstrap gui/$(id -u) <path>. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{{LABEL_PREFIX}}.assignment-watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string><string>-c</string>
+    <string>cd "{{HOME}}/semester-tracker/assignment-watch" &amp;&amp; H=$(date +%H); if [ "$H" = "12" ]; then exec /opt/homebrew/bin/python3 assignment_watch.py --loop-until 13:45; else exec /opt/homebrew/bin/python3 assignment_watch.py; fi</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string></dict>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>58</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>58</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>12</integer><key>Minute</key><integer>58</integer></dict>
+    <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>{{HOME}}/Library/Logs/assignment-watch.log</string>
+  <key>StandardErrorPath</key><string>{{HOME}}/Library/Logs/assignment-watch.log</string>
+</dict>
+</plist>

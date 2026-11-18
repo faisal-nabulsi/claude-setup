@@ -1,0 +1,6 @@
+{
+  "name": "status-band",
+  "version": "0.1.1",
+  "description": "A clean status band above the prompt: next deadlines, a prompt queue (/q), and a warning when a usage limit runs high",
+  "author": { "name": "claude-setup" }
+}

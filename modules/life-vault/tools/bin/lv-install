@@ -1,0 +1,441 @@
+#!/usr/bin/python3
+# tools/bin/lv-install
+"""Register the Stop hook and write the two LaunchAgents.
+
+The settings merge is done with json, never a hand edit, because that file also
+holds the model selection and the plugin list and a mis-escape there breaks far
+more than capture.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import plistlib
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+TOOLS = Path(__file__).resolve().parents[1]
+VAULT = TOOLS.parent
+PREFIX = "{{LABEL_PREFIX}}.lifevault"
+CAPTURE = str(TOOLS / "bin" / "lv-capture")
+PYTHON = "/usr/bin/python3"
+
+# The /remember skill is two files that are one artifact, and only ONE of them
+# is installed.
+#
+# SKILL.md is a prompt: Claude Code loads it from ~/.claude/skills/<name>/ and
+# nowhere else, so it has to be copied out of the repo to work at all.
+# remember.py is the half that must not depend on a model's judgement, and it
+# finds the `lifevault` package at `parents[2]` of its own location. Under
+# ~/.claude/skills/remember/ that is ~/.claude, which holds no package — a
+# copied script would fall through to its `$LIFE_VAULT/tools` guess, and a
+# wrong guess there is an installed skill that fails on the credential gate's
+# own import. So the script stays in the working tree beside the package, and
+# the installed prompt names it by absolute path.
+#
+# That makes the copy correct only while the prompt's hard-coded path still
+# points at this checkout, which `install_skill` verifies rather than assumes.
+SKILL_SRC = TOOLS / "skills" / "remember"
+SKILL_FILE = "SKILL.md"
+SKILL_SCRIPT = SKILL_SRC / "remember.py"
+# The interpreter the SELF-TEST runs under, which is not the one this script
+# runs under. The shebang is /usr/bin/python3, so `sys.executable` is
+# /usr/bin/python3 — and that interpreter has no pytest (verified on this
+# machine: `No module named pytest`). Invoked through its own shebang, the
+# self-test therefore always exited non-zero and main() printed "refusing to
+# register the hook: its own test suite fails". Step 4 chmods +x and invites
+# exactly that invocation, and FIXES["hook-missing"] names this command as the
+# one documented way to recover a de-registered hook — so the single repair
+# path in the design was guaranteed to fail while blaming the wrong component.
+SELFTEST_PY = str(VAULT / ".venv" / "bin" / "python")
+# launchctl getenv PATH is empty on this machine and claude is at ~/.local/bin,
+# which is on no default PATH. A launchd job with an inherited PATH would fail
+# to find it, silently, forever.
+PATH = f"{HOME}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+# The registered command, NOT the bare path.
+#
+# A Stop hook exiting 2 means "block the turn and feed stderr back to the
+# model", in every project, until the consecutive-block cap. /bin/sh exits 2 on
+# a parse error, 126 when the file is not executable, and 127 when it is
+# missing — and `exec 2>/dev/null` on line 1 of lv-capture hides the
+# diagnostic, so all three would be silent turn-blocking loops. A `git checkout`
+# of an older commit in ~/life is enough to produce the 127.
+#
+# Measured: `'<path>'; exit 0` collapses 2, 126 and 127 all to 0. The exit code
+# is therefore a property of the BOUNDARY, not of a script that a future edit
+# could break. Task 0 Q5 confirms the string reaches a shell.
+HOOK_COMMAND = f"'{CAPTURE}'; exit 0"
+
+
+def load_settings(settings_path: Path) -> tuple[Path, dict]:
+    """Resolve, parse and SHAPE-CHECK ~/.claude/settings.json, or refuse.
+
+    Every one of these used to be an unhandled traceback: a JSONC comment, a
+    trailing comma, `"hooks": []`, `"Stop": {}`, or a Stop element that is not
+    an object. `json.loads` was bare, `hooks.setdefault("Stop", [])` assumed a
+    dict, and `for group in stop: group["hooks"] = …` assumed a list of dicts.
+    And because main() took its backup and printed "to undo by hand later: cp …"
+    BEFORE calling merge_hook, the user was left with a stack trace, a stray
+    settings.json.bak-… in ~/.claude, and undo instructions for something that
+    never happened.
+
+    SystemExit rather than a repair: this file also holds the model selection,
+    the plugin list and auth-adjacent config, and guessing at what a
+    hand-written malformation meant is not something an installer should do.
+    """
+    # Follow a symlink rather than replacing it: dotfile repos routinely symlink
+    # ~/.claude/settings.json, and os.replace onto the link would silently
+    # detach it from the repository it belongs to.
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    if settings_path.is_symlink():
+        settings_path = settings_path.resolve()
+
+    data: dict = {}
+    if settings_path.exists() and settings_path.read_text(encoding="utf-8").strip():
+        try:
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"refusing: {settings_path} is not valid JSON (line {exc.lineno}, "
+                f"column {exc.colno}: {exc.msg}). Claude Code will not load it "
+                f"either. Fix it or move it aside, then re-run. Nothing was "
+                f"changed and no backup was taken.")
+    if not isinstance(data, dict):
+        raise SystemExit(f"refusing: {settings_path} is not a JSON object")
+
+    hooks = data.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise SystemExit(
+            f"refusing: {settings_path} has a `hooks` key that is a "
+            f"{type(hooks).__name__}, not an object. Nothing was changed.")
+    stop = hooks.get("Stop", [])
+    if not isinstance(stop, list):
+        raise SystemExit(
+            f"refusing: {settings_path} has a `hooks.Stop` that is a "
+            f"{type(stop).__name__}, not a list. Nothing was changed.")
+    for group in stop:
+        if not isinstance(group, dict):
+            raise SystemExit(
+                f"refusing: {settings_path} has an entry in `hooks.Stop` that is "
+                f"a {type(group).__name__}, not an object. Nothing was changed.")
+    return settings_path, data
+
+
+def merge_hook(settings_path: Path, data: dict) -> None:
+    hooks = data.setdefault("hooks", {})
+    stop = hooks.setdefault("Stop", [])
+    # Strip ANY prior lv-capture registration, not only one whose command string
+    # is byte-identical to today's. Matching on equality meant that if the vault
+    # ever moved, the stale absolute path stayed registered forever alongside
+    # the new one — guaranteeing a 127 and an error message after every response,
+    # permanently, with no way to notice except the noise.
+    for group in stop:
+        group["hooks"] = [h for h in group.get("hooks", [])
+                          if "lv-capture" not in h.get("command", "")]
+    stop[:] = [g for g in stop if g.get("hooks")]
+    # No `matcher`: whether Stop accepts one is unsettled, and omitting it is
+    # free. No `async`: schema-present in 2.1.170 but never observed at runtime,
+    # and it is unknown whether stdin is still piped to an async hook. The hook
+    # is a printf and an mv; there is nothing to gain and a silent validation
+    # rejection to lose.
+    stop.append({"hooks": [{"type": "command", "command": HOOK_COMMAND, "timeout": 5}]})
+
+    payload = json.dumps(data, indent=2) + "\n"
+    json.loads(payload)                      # never leave it unparseable
+    _write_settings(settings_path, payload)
+
+
+def _write_settings(settings_path: Path, payload: str) -> None:
+    """Preserve the mode, fsync, then rename.
+
+    Two defects this closes, both measured on this machine. settings.json is
+    mode 0600 and the umask is 022, so `Path.write_text` created the temp file
+    at 0644 and the rename made the file that can hold the API-key helper, env vars
+    and auth-adjacent config world-readable. And with no fsync, a crash between
+    the rename and the flush leaves a zero-length ~/.claude/settings.json —
+    which breaks Claude Code startup in EVERY project, not just capture.
+    `lifevault.atomic.write_atomic` is exactly this recipe, but lv-install runs
+    under /usr/bin/python3 and must work before the package is importable from
+    wherever it was invoked, so it is reimplemented here with mode preservation
+    added. Keep the two in step.
+    """
+    mode = 0o600
+    if settings_path.exists():
+        mode = settings_path.stat().st_mode & 0o777
+    tmp = settings_path.parent / f".{settings_path.name}.tmp.{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.write(fd, payload.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, mode)          # O_CREAT applies the umask; this does not
+    os.replace(tmp, settings_path)
+    dir_fd = os.open(settings_path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def install_skill(dest: Path) -> list[str]:
+    """Copy SKILL.md into `dest`, and nothing else. Idempotent.
+
+    Refuses rather than installs a prompt that names a script which is not
+    there. SKILL.md carries the absolute path of remember.py twice — once in
+    `allowed-tools`, once in the step-2 command a model is told to run
+    verbatim — because nothing the user typed may ever reach a shell, which
+    means the command has to be a constant. A constant goes stale when the
+    vault moves, and the failure is silent: the skill loads, the model runs a
+    path that no longer exists, and `/remember` reports a shell error instead
+    of filing anything. Checking it here turns that into a refusal at install
+    time with the file to edit named.
+    """
+    source = SKILL_SRC / SKILL_FILE
+    if not source.is_file():
+        raise SystemExit(
+            f"refusing: {source} does not exist, so there is no skill to "
+            f"install. Restore it with `/usr/bin/git -C {VAULT} checkout -- "
+            f"tools/skills/remember/`. Nothing was changed.")
+    text = source.read_text(encoding="utf-8")
+    if not SKILL_SCRIPT.is_file():
+        raise SystemExit(
+            f"refusing: {source} exists but {SKILL_SCRIPT} does not, and the "
+            f"prompt is useless without the script it drives. Restore it with "
+            f"`/usr/bin/git -C {VAULT} checkout -- tools/skills/remember/`. "
+            f"Nothing was changed.")
+    if str(SKILL_SCRIPT) not in text:
+        raise SystemExit(
+            f"refusing: {source} does not name {SKILL_SCRIPT}, so the copy "
+            f"placed in {dest} would tell Claude to run a script that is not "
+            f"there. This is what a moved or renamed vault looks like: edit "
+            f"the two absolute paths in {source} to point at this checkout, "
+            f"then re-run. Nothing was changed.")
+    if not os.access(SKILL_SCRIPT, os.X_OK):
+        raise SystemExit(
+            f"refusing: {SKILL_SCRIPT} is not executable, and the skill "
+            f"invokes it as a command. Fix it with `/bin/chmod +x "
+            f"{SKILL_SCRIPT}`, then re-run. Nothing was changed.")
+
+    target = dest / SKILL_FILE
+    if target.is_file() and target.read_text(encoding="utf-8") == text:
+        return [f"{target} is already up to date"]
+    verb = "updated" if target.exists() else "installed"
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    return [f"{verb} the /remember skill: {target}",
+            f"  its script stays in the repo at {SKILL_SCRIPT}, which is where "
+            f"the lifevault package is"]
+
+
+def uninstall_skill(dest: Path) -> list[str]:
+    """Remove exactly what install_skill created, and say what is left.
+
+    `shutil.rmtree(dest)` was the previous shape and it removes more than this
+    installer ever put there. Install writes one file; uninstall removes that
+    file, then the directory only if nothing else remains in it. A skill
+    directory holding something a person added by hand is reported, not
+    deleted — an uninstaller that eats an unrelated file is a worse bug than
+    one that leaves an empty directory behind.
+    """
+    done: list[str] = []
+    target = dest / SKILL_FILE
+    if target.exists():
+        target.unlink()
+        done.append(f"removed {target}")
+    if not dest.is_dir():
+        return done
+    leftovers = sorted(p.name for p in dest.iterdir())
+    if leftovers:
+        done.append(f"left {dest} in place: it still holds "
+                    f"{', '.join(leftovers)}, which this installer did not write")
+    else:
+        dest.rmdir()
+        done.append(f"removed {dest}")
+    return done
+
+
+def uninstall(settings_path: Path, agents: Path, skill: Path) -> list[str]:
+    """Remove everything this installer added, and say what is left.
+
+    There was no uninstall path at all, only three scattered manual fragments —
+    and the documented undo, `cp ~/.claude/settings.json.bak-$(date +%Y%m%d)`,
+    evaluates the date at UNDO time, so it worked only on the day of
+    installation and afterwards failed with "No such file" while leaving the
+    hook registered. Restoring a whole backup is the wrong shape anyway: it
+    would also revert every unrelated settings change made since.
+    """
+    done: list[str] = []
+    # LV_NO_LAUNCHCTL exists so the test suite can exercise this function
+    # without booting out the agents on the machine it is running on.
+    skip_launchctl = bool(os.environ.get("LV_NO_LAUNCHCTL"))
+    for name in ("harvest", "sweep"):
+        label = f"{PREFIX}.{name}"
+        if skip_launchctl:
+            done.append(f"skipped launchctl bootout for {label}")
+        else:
+            result = subprocess.run(
+                ["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+                capture_output=True, text=True)
+            done.append(f"unloaded {label}" if result.returncode == 0
+                        else f"{label} was not loaded")
+        plist = agents / f"{label}.plist"
+        if plist.exists():
+            plist.unlink()
+            done.append(f"removed {plist}")
+
+    # Same parse-and-shape-check as the install path, so a malformed settings
+    # file refuses here too rather than half-uninstalling with a traceback.
+    settings_path, data = load_settings(settings_path)
+    if data:
+        stop = data.get("hooks", {}).get("Stop") or []
+        before = sum(len(g.get("hooks", [])) for g in stop)
+        for group in stop:
+            group["hooks"] = [h for h in group.get("hooks", [])
+                              if "lv-capture" not in h.get("command", "")]
+        stop[:] = [g for g in stop if g.get("hooks")]
+        if not stop:
+            data.get("hooks", {}).pop("Stop", None)
+        if not data.get("hooks"):
+            data.pop("hooks", None)
+        after = sum(len(g.get("hooks", [])) for g in stop)
+        _write_settings(settings_path, json.dumps(data, indent=2) + "\n")
+        done.append(f"removed {before - after} lv-capture hook(s) from {settings_path}")
+
+    done.extend(uninstall_skill(skill))
+
+    done.append("")
+    done.append("Left in place on purpose — delete by hand if you want them gone:")
+    done.append(f"  {VAULT}/sources/claude-code/   the durable evidence spool")
+    done.append(f"  {VAULT}/_health/               health files and heartbeats")
+    done.append(f"  {VAULT}/_review/               pending and decided proposals")
+    done.append(f"  {VAULT}/_index/subjects.tsv    the subject namespace")
+    done.append(f"  {VAULT}/_queue/                the pointer queue")
+    done.append("  every fact already filed in the vault; `lv undo <posting>` "
+                "retires one at a time")
+    return done
+
+
+def plist(name: str, argv: list[str], schedule: dict) -> dict:
+    return {
+        "Label": f"{PREFIX}.{name}",
+        "ProgramArguments": argv,
+        "StartCalendarInterval": schedule,
+        "RunAtLoad": False,
+        "EnvironmentVariables": {
+            "PATH": PATH,
+            "HOME": str(HOME),
+            "LIFE_VAULT": str(VAULT),
+            "LIFEVAULT_NO_CAPTURE": "1",
+        },
+        "StandardOutPath": f"{HOME}/Library/Logs/lifevault-{name}.log",
+        "StandardErrorPath": f"{HOME}/Library/Logs/lifevault-{name}.log",
+        "ProcessType": "Background",
+        "LowPriorityIO": True,
+        "Nice": 5,
+    }
+
+
+def write_plists(agents: Path) -> list[Path]:
+    agents.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name, argv, schedule in (
+        ("harvest", [PYTHON, str(TOOLS / "bin" / "lv-harvest")], {"Minute": 7}),
+        # NOT "--now": that flag is defined in lv-sweep's argparse (help="run
+        # immediately") but never read anywhere in lv-sweep's own logic, so it
+        # is currently inert. Including it here broke
+        # test_the_plists_use_absolute_program_arguments, which requires every
+        # ProgramArguments element to be an absolute path — a flag string never
+        # can be. Dropping it changes no runtime behaviour of lv-sweep.
+        ("sweep", [PYTHON, str(TOOLS / "bin" / "lv-sweep")],
+         {"Hour": 3, "Minute": 15}),
+    ):
+        path = agents / f"{PREFIX}.{name}.plist"
+        path.write_bytes(plistlib.dumps(plist(name, argv, schedule)))
+        written.append(path)
+    return written
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="lv-install")
+    parser.add_argument("--settings", default=str(HOME / ".claude" / "settings.json"))
+    parser.add_argument("--agents", default=str(HOME / "Library" / "LaunchAgents"))
+    parser.add_argument("--hook-only", action="store_true")
+    parser.add_argument("--plists-only", action="store_true")
+    parser.add_argument("--skill-only", action="store_true")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="remove the hook, both agents and the skill")
+    parser.add_argument("--skill", default=str(HOME / ".claude" / "skills" / "remember"),
+                        help="where to install the /remember skill, and what "
+                             "--uninstall removes")
+    parser.add_argument("--self-test-command", default="")
+    args = parser.parse_args()
+
+    if args.uninstall:
+        for line in uninstall(Path(args.settings), Path(args.agents), Path(args.skill)):
+            print(line)
+        return 0
+
+    # Each `--*-only` flag suppresses the other two, so a flag named "only"
+    # never has a side effect. This matters for the skill in particular:
+    # `--hook-only` is the ONE documented repair for a de-registered hook,
+    # health prints it verbatim, and it runs on a real machine with --skill at
+    # its default of ~/.claude/skills/remember.
+    partial = args.hook_only or args.plists_only or args.skill_only
+    do_hook = args.hook_only or not partial
+    do_plists = args.plists_only or not partial
+    do_skill = args.skill_only or not partial
+
+    if do_hook:
+        # The no-spawn property is the primary recursion guard. Refuse to
+        # register a hook that has stopped satisfying it.
+        # NOT sys.executable: this script's own shebang is /usr/bin/python3 and
+        # that interpreter has no pytest. See SELFTEST_PY.
+        runner = SELFTEST_PY if Path(SELFTEST_PY).exists() else sys.executable
+        cmd = ([args.self_test_command] if args.self_test_command else
+               [runner, "-m", "pytest",
+                str(TOOLS / "tests" / "test_capture_hook.py"), "-q"])
+        result = subprocess.run(cmd, cwd=str(TOOLS), capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"refusing to register the hook: its own test suite fails "
+                  f"(ran with {cmd[0]}).\n" + result.stdout[-2000:], file=sys.stderr)
+            return 1
+
+        # Parse and shape-check BEFORE taking a backup or printing undo
+        # instructions. A refusal must leave no artefact: the old order produced
+        # a stack trace, a stray settings.json.bak-… and printed undo advice for
+        # a change that never happened.
+        settings_path, data = load_settings(Path(args.settings))
+        if settings_path.exists():
+            backup = settings_path.with_name(
+                f"{settings_path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+            shutil.copy2(settings_path, backup)
+            print(f"backed up {settings_path} -> {backup}")
+            print(f"to undo by hand later: cp '{backup}' '{settings_path}'")
+        merge_hook(settings_path, data)
+        print(f"registered the Stop hook in {args.settings}")
+        print("to remove it properly: lv-install --uninstall")
+
+    if do_skill:
+        for line in install_skill(Path(args.skill)):
+            print(line)
+
+    if do_plists:
+        for path in write_plists(Path(args.agents)):
+            print(f"wrote {path}")
+        print("\nNot loaded. To activate, run:")
+        for name in ("harvest", "sweep"):
+            print(f"  launchctl bootstrap gui/$(id -u) "
+                  f"{args.agents}/{PREFIX}.{name}.plist")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

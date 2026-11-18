@@ -1,0 +1,6 @@
+{
+  "source_url": "https://example.com/listings.json",
+  "id_field": "id",
+  "include": ["software", "engineer", "intern"],
+  "exclude": ["phd", "senior"]
+}

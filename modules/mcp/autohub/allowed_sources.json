@@ -1,0 +1,6 @@
+{
+  "_note": "Connector tools autohub may call. Read tools only. Adding anything here needs the user's OK in chat.",
+  "coursework": {"gradescope_assignments": {}, "gradescope_courses": {}, "ed_threads": {}},
+  "lemonsqueezy": {"ls_list_orders": {}, "ls_list_subscriptions": {}, "ls_list_stores": {}},
+  "google-workspace": {"manage_email": {"operation": ["search", "read"]}, "manage_calendar": {"operation": ["list"]}}
+}

@@ -1,0 +1,31 @@
+{
+	"name": "tracker-mcp",
+	"version": "0.1.0",
+	"private": true,
+	"description": "the user's personal to-do tracker as a remote MCP server (Cloudflare Workers + GitHub OAuth, allowlisted).",
+	"type": "module",
+	"scripts": {
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev",
+		"start": "wrangler dev",
+		"cf-typegen": "wrangler types --strict-vars=false",
+		"type-check": "tsc --noEmit",
+		"test": "vitest run",
+		"test:e2e": "vitest run --config vitest.e2e.config.ts",
+		"dry-run": "wrangler deploy --dry-run --outdir dist",
+		"check": "npm run type-check && npm test && npm run test:e2e && npm run dry-run"
+	},
+	"dependencies": {
+		"@cloudflare/workers-oauth-provider": "0.10.4",
+		"@modelcontextprotocol/sdk": "1.29.0",
+		"agents": "0.17.4",
+		"hono": "4.13.13",
+		"zod": "4.6.5"
+	},
+	"devDependencies": {
+		"@types/node": "22.20.5",
+		"typescript": "6.0.3",
+		"vitest": "5.0.3",
+		"wrangler": "4.149.0"
+	}
+}

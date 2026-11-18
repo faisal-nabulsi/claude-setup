@@ -1,0 +1,7 @@
+# Copy to .dev.vars for `npm run dev` (local only; .dev.vars is gitignored).
+# Use a SEPARATE GitHub OAuth App for local dev, with callback
+# http://localhost:8788/callback.
+GITHUB_CLIENT_ID=<local oauth app client id>
+GITHUB_CLIENT_SECRET=<local oauth app client secret>
+COOKIE_ENCRYPTION_KEY=<output of: openssl rand -hex 32>
+GITHUB_TRACKER_TOKEN=<fine-grained PAT; consider a read-only one for local dev>

@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+# tools/bin/lv-forget
+"""Remove entries matching a suppression list, and keep removing them.
+
+Deletion is not supersession. Supersession is for a claim that stopped being
+true; the old text stays, findable, as history. This is for a claim that was
+never true -- a fabrication, or a detail an extractor invented -- and for
+material the user has asked not to hold. Leaving that as `superseded` would keep
+it retrievable and keep it reading like something that happened.
+
+WHY THIS IS A COMMAND AND NOT A ONE-OFF. Deleting once is not enough. Facts
+enter this vault from long-running extraction workflows that cache their
+agents' results, so resuming or re-running one re-files whatever it had already
+proposed -- including material deleted in between. That is exactly how a
+removed fabricated person came back forty minutes after being removed: the deletion was
+real, the workflow's cache simply predated it. Anything that can be re-proposed
+has to be re-suppressible, cheaply, as many times as it takes.
+
+The patterns live in _review/deletions.md, which is therefore not a log of what
+happened but the standing instruction. Lines beginning `pattern:` are read as
+case-insensitive regexes and matched against every entry's title, body, subject
+and quote.
+
+Lines beginning `keep:` name a SUBJECT that survives a pattern match, and they
+exist because a suppression list cannot distinguish a fabrication from the
+record that it WAS a fabrication -- both contain the same words. A pattern
+for a fabricated trip would also delete `trip-did-not-happen`, whose whole content is the user
+saying "that didn't happen". Losing that is how a vault forgets it was ever
+wrong, which is worse than holding the original error.
+
+Usage:
+    lv-forget            # report what would go, change nothing
+    lv-forget --apply    # remove them
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from lifevault.atomic import write_atomic          # noqa: E402
+from lifevault.entry import DELIM, parse_entries    # noqa: E402
+from lifevault.vaultlock import vault_lock          # noqa: E402
+
+PATTERN_LINE = re.compile(r"^pattern:\s*(.+?)\s*$", re.MULTILINE)
+
+#: Subjects that survive a pattern match. A suppression list cannot tell a
+#: fabrication from the RECORD THAT IT WAS A FABRICATION -- both contain the
+#: same words. `trip-did-not-happen` holds the user's own "that didn't
+#: happen", which is the most useful fact in the whole affair, and the
+#: trip pattern deleted it. Suppressing the correction along with the
+#: claim is how a vault forgets that it was ever wrong.
+KEEP_LINE = re.compile(r"^keep:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def vault_root() -> Path:
+    return Path(os.environ.get("LIFE_VAULT", Path.home() / "life"))
+
+
+def load_patterns(vault: Path) -> tuple[list[re.Pattern], set[str]]:
+    """The `pattern:` regexes and the `keep:` subjects that override them."""
+    path = vault / "_review" / "deletions.md"
+    if not path.exists():
+        return [], set()
+    text = path.read_text(encoding="utf-8")
+    out = []
+    for raw in PATTERN_LINE.findall(text):
+        try:
+            out.append(re.compile(raw, re.IGNORECASE))
+        except re.error as exc:
+            # A broken regex must not silently suppress nothing. The whole point
+            # of this file is that it keeps working unattended.
+            raise SystemExit(f"bad pattern in {path}: {raw!r} ({exc})") from None
+    return out, {s.strip() for s in KEEP_LINE.findall(text)}
+
+
+def blocks(text: str) -> list[list[str]]:
+    """Split into raw blocks exactly as parse_entries sees them.
+
+    Surgical, not a re-render: a round trip through render_entry would be free
+    to renormalize a quote or reorder tags on every entry it kept, so "we only
+    removed things" would quietly stop being true.
+    """
+    out: list[list[str]] = []
+    cur: list[str] | None = None
+    for line in text.split("\n"):
+        if line == DELIM:
+            if cur is not None:
+                out.append(cur)
+            cur = [line]
+        elif cur is not None:
+            cur.append(line)
+    if cur is not None:
+        out.append(cur)
+    return out
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="lv-forget")
+    ap.add_argument("--apply", action="store_true",
+                    help="actually remove; default is a dry run")
+    args = ap.parse_args()
+
+    vault = vault_root()
+    patterns, keep = load_patterns(vault)
+    if not patterns:
+        print(f"no `pattern:` lines in {vault}/_review/deletions.md", file=sys.stderr)
+        return 1
+
+    doomed: list[tuple[Path, str, str, str]] = []
+    # Accumulated across every file, not per file: declared inside the loop it
+    # would report only the last log's exemptions and silently drop the rest.
+    kept_by_name: list[tuple[Path, str]] = []
+    with vault_lock(vault, timeout=300):
+        for path in sorted(vault.rglob("log.md")):
+            if any(p.startswith("_") for p in path.relative_to(vault).parts):
+                continue
+            text = path.read_text(encoding="utf-8")
+            raw = blocks(text)
+            entries = parse_entries(text)
+            if len(raw) != len(entries):
+                raise SystemExit(f"{path}: {len(raw)} blocks but {len(entries)} entries")
+
+            keep_block = []
+            for block, entry in zip(raw, entries):
+                hay = f"{entry.title}\n{entry.body}\n{entry.subject}\n{entry.quote or ''}"
+                if entry.subject in keep:
+                    kept_by_name.append((path.relative_to(vault), entry.subject))
+                    keep_block.append(block)
+                    continue
+                if any(p.search(hay) for p in patterns):
+                    doomed.append((path.relative_to(vault), entry.date, entry.subject,
+                                   entry.title))
+                else:
+                    keep_block.append(block)
+
+            if args.apply and len(keep_block) != len(raw):
+                new = "\n".join("\n".join(b).rstrip("\n") for b in keep_block)
+                if new:
+                    new += "\n"
+                write_atomic(path, lambda fh, n=new: fh.write(n))
+
+    if kept_by_name:
+        print(f"exempted by `keep:` ({len(kept_by_name)}):")
+        for rel, subject in kept_by_name:
+            print(f"  {rel} {subject}")
+    verb = "removed" if args.apply else "would remove"
+    print(f"{verb} {len(doomed)} entries")
+    for rel, date, subject, title in doomed:
+        print(f"  {rel} {date} {subject} — {title[:60]}")
+    if doomed and not args.apply:
+        print("\nre-run with --apply to remove them")
+    if args.apply and doomed:
+        print("\nNote: git history still holds these. This vault has no remote, "
+              "so a rebase is safe if they must be gone for good.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

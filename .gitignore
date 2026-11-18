@@ -1,0 +1,11 @@
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+.env
+.ntfy.env
+.dev.vars
+.wrangler/
+dist/
+worker-configuration.d.ts
+.DS_Store

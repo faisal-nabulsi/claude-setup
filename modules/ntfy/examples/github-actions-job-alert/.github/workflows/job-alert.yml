@@ -1,0 +1,35 @@
+# Example: a GitHub Actions job that checks a public internship list every 2 hours and
+# pushes your phone (ntfy) when a new posting matches your filters.
+#
+# Setup: put this repo on GitHub (private is fine), then Settings → Secrets and variables →
+# Actions → New repository secret: NTFY_TOPIC = your topic. Edit config.json.
+# Cost: $0 (well inside the free Actions minutes for a private repo).
+name: job-alert
+on:
+  schedule:
+    - cron: "17 */2 * * *"     # every 2 hours, at :17 (UTC)
+  workflow_dispatch: {}         # adds a "Run workflow" button for testing
+
+permissions:
+  contents: write               # to commit seen.json back, so nothing is pushed twice
+
+concurrency:
+  group: job-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check listings
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python3 check_jobs.py
+      - name: Save what was seen
+        run: |
+          git config user.name "job-alert"
+          git config user.email "actions@users.noreply.github.com"
+          git add seen.json
+          git diff --cached --quiet || (git commit -m "seen" && git push)

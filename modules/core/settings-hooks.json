@@ -1,0 +1,28 @@
+{
+  "_comment": "Merge snippet for ~/.claude/settings.json. install.sh merges the blocks for the modules you pick (it never overwrites the file and backs it up first). {{HOME}} is filled in by the installer.",
+  "hooks": {
+    "SessionStart": [
+      {"matcher": "startup|resume|clear|compact", "hooks": [{"type": "command", "command": "python3 {{HOME}}/.claude/hooks/today.py", "timeout": 5}], "_module": "semester-tracker"},
+      {"matcher": "startup", "hooks": [{"type": "command", "command": "python3 {{HOME}}/.claude/hooks/icloud_guard.py", "timeout": 8}], "_module": "icloud-guard"}
+    ],
+    "PreToolUse": [
+      {"matcher": "Bash|Write|Edit|MultiEdit", "hooks": [{"type": "command", "command": "python3 {{HOME}}/.claude/hooks/deadlines_guard.py pre", "timeout": 5}], "_module": "semester-tracker"},
+      {"matcher": "Bash|Read", "hooks": [{"type": "command", "command": "python3 {{HOME}}/.claude/hooks/secrets_guard.py", "timeout": 5}], "_module": "hooks"},
+      {"matcher": "Bash|mcp__claude-in-chrome__.*|mcp__Claude_Browser__.*|mcp__computer-use__.*|mcp__remote-devices__.*", "hooks": [{"type": "command", "command": "python3 {{HOME}}/.claude/hooks/connectors_first.py", "timeout": 10}], "_module": "hooks"}
+    ],
+    "PostToolUse": [
+      {"matcher": "Bash|Write|Edit|MultiEdit", "hooks": [{"type": "command", "command": "python3 {{HOME}}/.claude/hooks/deadlines_guard.py post", "timeout": 10}], "_module": "semester-tracker"}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "'{{HOME}}/life/tools/bin/lv-capture'; exit 0", "timeout": 5}], "_module": "life-vault"}
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Read({{HOME}}/life/*)",
+      "Bash(python3 {{HOME}}/life/tools/bin/lv *)"
+    ],
+    "additionalDirectories": ["{{HOME}}/life"],
+    "_module": "life-vault"
+  }
+}

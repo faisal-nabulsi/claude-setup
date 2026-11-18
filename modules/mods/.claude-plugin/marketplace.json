@@ -1,0 +1,9 @@
+{
+  "name": "my-mods",
+  "owner": {"name": "claude-setup"},
+  "plugins": [
+    {"name": "todo-panel", "source": "./todo-panel", "description": "/todo opens the tracker list instantly (no model call)"},
+    {"name": "model-router", "source": "./model-router", "description": "Routes each turn to the model/effort that fits it, with !opus/!sonnet/!haiku/!deep/!quick overrides"},
+    {"name": "status-band", "source": "./status-band", "description": "Status band above the prompt: context fullness, next deadlines, a /q prompt queue, usage-limit warning"}
+  ]
+}

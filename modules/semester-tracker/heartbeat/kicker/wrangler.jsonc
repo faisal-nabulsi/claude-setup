@@ -1,0 +1,22 @@
+{
+  "name": "heartbeat-kicker",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  // Public URL for the /todo phone glance (GLANCE.md):
+  // https://heartbeat-kicker.<subdomain>.workers.dev/todo. Every request needs the
+  // bearer key; every other path or method is a 404.
+  "workers_dev": true,
+  // No per-version preview URLs, so only the deployed version can answer.
+  "preview_urls": false,
+  // Same schedule the GitHub workflow asks for (UTC): every 30 min except
+  // 1am–6am PT. Cloudflare actually fires on time; GitHub's own cron doesn't.
+  "triggers": { "crons": ["7,37 0-8,14-23 * * *"] },
+  // Not secrets: repo coordinates only. Secrets (GH_TOKEN, GLANCE_KEY,
+  // GITHUB_READ_TOKEN) live in Cloudflare via `wrangler secret put`, never here.
+  "vars": {
+    "REPO": "YOUR-GITHUB-LOGIN/semester-heartbeat",
+    "WORKFLOW": "heartbeat.yml",
+    "REF": "main"
+  },
+  "observability": { "enabled": true }
+}

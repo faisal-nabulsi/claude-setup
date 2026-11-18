@@ -1,0 +1,88 @@
+#!/usr/bin/python3
+# tools/bin/lv-mail
+"""Nightly: spool new mail (your Gmail accounts) into the evidence spool.
+
+launchd runs this as `/usr/bin/python3 <this file>`. It reads incoming mail for
+every address in LIFE_VAULT_MAIL_ACCOUNTS through your Google
+connector (the read-only `google-workspace` MCP server), from each account's
+last successful run forward, redacts, and banks it; the nightly sweep turns it
+into facts. It also deletes saved mail the sweep found nothing in, once two
+weeks old (`mail_ingest.prune`). Nothing here touches Mail.app or osascript. Exit codes match
+lv-harvest: 0 success, 1 a clean refusal (nothing written -- e.g. the connector
+cannot start), 2 anything else, including one account failing while the other
+succeeded. No exception ever reaches the top as a traceback.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from lifevault.capture import mail_ingest as mail  # noqa: E402
+from lifevault.capture.google_connector import GoogleConnector  # noqa: E402
+
+os.environ["LIFEVAULT_NO_CAPTURE"] = "1"
+
+_FIELDS = ("accounts", "seen", "spooled", "secrets_dropped", "sensitive_flagged",
+           "duplicates", "suppressed", "pruned", "errors")
+
+
+def vault_root() -> Path:
+    return Path(os.environ.get("LIFE_VAULT", Path.home() / "life"))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="lv-mail")
+    parser.add_argument("--vault", default=str(vault_root()))
+    parser.add_argument("--check", action="store_true",
+                        help="report only whether the Google connector answers for each account; write nothing")
+    args = parser.parse_args()
+
+    if args.check:
+        return check()
+
+    vault = Path(args.vault)
+    if not vault.is_dir():
+        print(f"lv-mail: refusing: vault not found: {vault}", file=sys.stderr)
+        return 1
+    try:
+        summary = mail.ingest_all(vault)
+    except Exception as exc:  # noqa: BLE001 -- unattended: never a traceback
+        print(f"lv-mail: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    if summary.get("error"):
+        print(f"lv-mail: refusing: {summary['error']}", file=sys.stderr)
+        return 1
+
+    try:
+        summary["pruned"] = mail.prune(vault)
+    except Exception as exc:  # noqa: BLE001 -- a failed prune deletes nothing; say so
+        summary["errors"] = summary.get("errors", 0) + 1
+        summary.setdefault("failures", []).append(f"prune: {type(exc).__name__}: {exc}")
+
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    print(stamp, " ".join(f"{k}={summary.get(k, 0)}" for k in _FIELDS))
+    for line in summary.get("failures", []):
+        print(f"{stamp} lv-mail: {line}", file=sys.stderr)
+    return 2 if summary.get("errors") else 0
+
+
+def check() -> int:
+    try:
+        with GoogleConnector() as conn:
+            for account in mail.ACCOUNTS:
+                conn.search(account, "newer_than:1d", 1)
+    except Exception as exc:  # noqa: BLE001 -- a check reports, it never raises
+        print(f"access=blocked {type(exc).__name__}: {exc}")
+        return 1
+    print("access=ok")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

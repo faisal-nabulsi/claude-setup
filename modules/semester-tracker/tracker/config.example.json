@@ -1,0 +1,60 @@
+{
+  "_comment": "Copy to config.json and edit. Everything here is yours; nothing in the scripts is.",
+  "timezone": "America/New_York",
+  "term": [
+    "Fall",
+    "2026"
+  ],
+  "term_start": "2026-08-26",
+  "term_end": "2026-12-18",
+  "canvas_host": "canvas.example.edu",
+  "canvas_courses": {
+    "1234567": "CS 101",
+    "2345678": "BIO 101"
+  },
+  "courses": [
+    [
+      "CS101",
+      "CS 101"
+    ],
+    [
+      "BIO101",
+      "BIO 101"
+    ]
+  ],
+  "file_checks": {},
+  "weekday_check_files": [],
+  "pollev": {
+    "timezone": "America/New_York",
+    "term_start": "2026-08-26",
+    "term_end": "2026-12-04",
+    "no_class": [
+      "2026-11-26"
+    ],
+    "courses": [
+      {
+        "course": "BIO 101",
+        "hosts": [
+          "presenter-handle"
+        ],
+        "days": [
+          0,
+          2,
+          4
+        ],
+        "start": "12:00",
+        "end": "13:00"
+      }
+    ]
+  },
+  "assignment_watch": {
+    "timezone": "America/New_York",
+    "watches": [
+      {
+        "course_id": "2345678",
+        "name_regex": "\\bcheck-?in\\b",
+        "label": "BIO 101"
+      }
+    ]
+  }
+}

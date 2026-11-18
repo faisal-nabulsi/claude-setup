@@ -1,0 +1,15 @@
+#!/bin/sh
+# Life vault Stop hook. Writes one session pointer. Spawns nothing. Exits 0 always.
+# Layer 0 of the recursion guard: this file contains no way to start a process.
+# tests/test_capture_hook.py enforces that; do not add one.
+exec 2>/dev/null
+cat >/dev/null
+if [ -n "$LIFEVAULT_NO_CAPTURE" ]; then exit 0; fi
+Q="${LIFE_VAULT:-$HOME/life}/_queue/pending"
+[ -d "$Q" ] || exit 0
+S="$CLAUDE_CODE_SESSION_ID"
+case "$S" in ""|*[!0-9a-f-]*) exit 0 ;; esac
+T="$Q/.$S.tmp"
+printf '%s\n' "$PWD" > "$T"
+mv -f "$T" "$Q/$S"
+exit 0

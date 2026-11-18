@@ -1,0 +1,8 @@
+{
+  "name": "lemonsqueezy-mcp-local",
+  "private": true,
+  "description": "Local install of @yawlabs/lemonsqueezy-mcp (pinned) behind a read-only filter",
+  "dependencies": {
+    "@yawlabs/lemonsqueezy-mcp": "1.1.3"
+  }
+}

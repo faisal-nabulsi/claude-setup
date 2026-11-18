@@ -1,0 +1,187 @@
+#!/usr/bin/python3
+# tools/bin/lv-harvest
+"""Hourly, model-free harvester: spool Claude Code transcripts into the vault.
+
+launchd runs this every hour as `/usr/bin/python3 <this file>` with no
+arguments -- see Task 15 of docs/plans/2026-07-27-capture.md and lv-install's
+`write_plists`. That interpreter is whatever ships with the OS (3.9.6 on this
+machine), not the project's .venv, so the `lifevault` package this imports
+must run under it; `test_runs_under_the_real_launchd_interpreter` in
+tools/tests/test_lv_harvest.py checks that directly rather than trusting the
+venv's green suite.
+
+All the actual work -- reading transcripts, redacting, deduping, spooling --
+is lifevault.capture.harvest.harvest(), already exercised by 30 tests. This
+file is only: argument parsing, the --dry-run preview, and turning any error
+into an exit code and a message a human (or a log-scanning script) can use
+without a traceback in the way. Exit codes match `lv`'s convention: 0 success,
+1 a clean refusal (nothing was written, the input was rejected), 2 anything
+else -- but unlike `lv`, which lets an exception outside its narrow tuple
+propagate as a traceback, this always converts to a clean message. A
+traceback in an unattended hourly log that nobody is watching is worse than
+imprecise, it is silent.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from lifevault.capture import harvest as harvest_mod  # noqa: E402
+from lifevault.capture import transcript as tx        # noqa: E402
+
+# Set before anything else, and therefore inherited by any child process this
+# script or anything it imports ever spawns. harvest() spawns nothing today --
+# `claude -p` returns 401 unattended on this machine, per harvest.py's own
+# module docstring -- but that is a property of today's code, not a contract a
+# future refactor is bound by. The one job this hourly run must never do is
+# re-trigger the Stop hook it exists downstream of, so the sentinel is set
+# here rather than trusted to keep being true. The plist also sets it, but a
+# wrapper that depended on its caller for this would break the moment anyone
+# ran it by hand to debug a stuck hour.
+os.environ["LIFEVAULT_NO_CAPTURE"] = "1"
+
+# The six fields to a stable order in the summary line, and the harvest()
+# summary key each one reads from ("sensitive_flagged" is computed here, not
+# by harvest(), see _sensitive_flagged).
+_SUMMARY_FIELDS = (
+    ("sessions_seen", "sessions_seen"),
+    ("sessions_harvested", "sessions_harvested"),
+    ("records_written", "turns_written"),
+    ("secrets_dropped", "secrets_dropped"),
+    ("soft_masked", "soft_masked"),
+    ("sensitive_flagged", "sensitive_flagged"),
+)
+
+# Copied into the throwaway shadow vault a --dry-run preview runs against, so
+# harvest() makes the SAME decisions -- what is excluded, what is already
+# harvested, whether capture is switched off -- it would make against the
+# real vault, without ever opening a file under the real --vault for writing.
+# Evidence itself is deliberately not copied: harvest()'s per-turn skip is
+# keyed on the ledger, which every real run keeps in step with evidence, so
+# the ledger alone is enough to avoid a dry run re-counting a turn it already
+# reported as harvestable a moment ago.
+_SHADOW_FILES = (
+    Path("sources") / "claude-code" / "exclude.default.txt",
+    Path("sources") / "claude-code" / "harvested-uuids.txt",
+    Path("_queue") / "exclude.txt",
+    Path("_queue") / "CAPTURE-OFF",
+)
+
+
+class Refusal(Exception):
+    """A clean, expected rejection: nothing was written. Exit 1, not 2."""
+
+
+def vault_root() -> Path:
+    # Verbatim from tools/bin/lv, so --vault's default and `lv add`'s resolve
+    # the same real vault from the same environment variable.
+    return Path(os.environ.get("LIFE_VAULT", Path.home() / "life"))
+
+
+def _shadow_copy(vault: Path, shadow: Path) -> None:
+    (shadow / "_queue" / "pending").mkdir(parents=True, exist_ok=True)
+    for rel in _SHADOW_FILES:
+        src = vault / rel
+        if not src.is_file():
+            continue
+        dest = shadow / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dest)
+
+
+def _sensitive_flagged(vault: Path, uuids: set) -> int:
+    """How many of `uuids` landed in the evidence spool flagged sensitive.
+
+    harvest()'s own summary dict has no such count -- only the per-record
+    `sensitive` flag -- and this file does not add one there, so the 30
+    existing tests never have to know this wrapper exists. `uuids` is a
+    before/after diff of the ledger, so this only ever looks at records this
+    run actually added, not the whole spool's history.
+    """
+    if not uuids:
+        return 0
+    evidence_dir = harvest_mod.source_dir(vault) / "evidence"
+    if not evidence_dir.is_dir():
+        return 0
+    count = 0
+    for path in sorted(evidence_dir.glob("*.jsonl")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.split("\n"):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("uuid") in uuids and record.get("sensitive"):
+                count += 1
+    return count
+
+
+def _run_harvest(vault: Path, projects: Path) -> dict:
+    before = harvest_mod.load_ledger(vault)
+    summary = harvest_mod.harvest(vault, projects)
+    after = harvest_mod.load_ledger(vault)
+    summary["sensitive_flagged"] = _sensitive_flagged(vault, after - before)
+    return summary
+
+
+def do_harvest(vault: Path, projects: Path, dry_run: bool) -> dict:
+    if not vault.is_dir():
+        raise Refusal(f"vault not found: {vault}")
+
+    if not dry_run:
+        return _run_harvest(vault, projects)
+
+    with tempfile.TemporaryDirectory(prefix="lv-harvest-dry-") as tmp:
+        shadow = Path(tmp)
+        _shadow_copy(vault, shadow)
+        return _run_harvest(shadow, projects)
+
+
+def summary_line(summary: dict, *, dry_run: bool) -> str:
+    fields = [(name, summary.get(key, 0)) for name, key in _SUMMARY_FIELDS]
+    fields.append(("dry_run", 1 if dry_run else 0))
+    fields.append(("no_capture", 1 if os.environ.get("LIFEVAULT_NO_CAPTURE") == "1" else 0))
+    return " ".join(f"{name}={value}" for name, value in fields)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="lv-harvest")
+    parser.add_argument("--vault", default=str(vault_root()))
+    parser.add_argument("--projects", default=str(tx.projects_dir()))
+    parser.add_argument("--dry-run", action="store_true",
+                        help="report what would be harvested; write nothing")
+    args = parser.parse_args()
+
+    try:
+        summary = do_harvest(Path(args.vault), Path(args.projects), args.dry_run)
+    except Refusal as exc:
+        print(f"lv-harvest: refusing: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        # No exception, expected or not, may reach the top as a traceback:
+        # this runs unattended once an hour into a log nobody is tailing live.
+        print(f"lv-harvest: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    if summary.get("error"):
+        print(f"lv-harvest: refusing: {summary['error']}", file=sys.stderr)
+        return 1
+
+    print(summary_line(summary, dry_run=args.dry_run))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

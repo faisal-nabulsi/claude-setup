@@ -1,0 +1,9 @@
+# Your "job -> connector" map. One line per job. The connectors-first hook quotes these lines
+# back to Claude the first time it reaches for the browser, the screen or AppleScript.
+# Lines starting with # are ignored. Edit freely.
+school LMS (Canvas) -> canvas MCP (download_course_file saves files)
+mail / Drive / Docs / Sheets / calendar -> google-workspace MCP (any of your accounts) or the claude.ai Google connectors
+Slack -> the claude.ai Slack connector
+Gradescope / PollEv / Ed Discussion -> coursework MCP (read-only)
+web pages to Markdown -> crawl4ai MCP (local, free)
+if those MCP tools aren't loaded (e.g. a scheduled run) -> python3 ~/code/scripts/mcp_bridge.py <server> call <tool> '<json>'

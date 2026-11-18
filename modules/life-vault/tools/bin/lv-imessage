@@ -1,0 +1,74 @@
+#!/usr/bin/python3
+# tools/bin/lv-imessage
+"""Nightly: spool new outgoing iMessages into the evidence spool.
+
+launchd runs this as `/usr/bin/python3 <this file>` -- the OS interpreter, not
+the project's .venv -- so everything imported must run under it, exactly like
+lv-harvest. It reads chat.db from the last watermark forward, redacts, and
+banks what is new; the nightly sweep turns it into facts. Argument style and
+exit codes match lv-harvest: 0 success, 1 a clean refusal (nothing written,
+input rejected -- e.g. Full Disk Access not granted), 2 anything else. No
+exception ever reaches the top as a traceback: this runs unattended into a log
+nobody is tailing, where a traceback is silent.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from lifevault.capture import imessage_ingest as ingest  # noqa: E402
+
+# Inherited by every child: this must never re-trigger the Stop hook it runs
+# downstream of. It spawns nothing today, but the sentinel is set rather than
+# trusted, the same as lv-harvest.
+os.environ["LIFEVAULT_NO_CAPTURE"] = "1"
+
+_FIELDS = ("seen", "spooled", "secrets_dropped", "sensitive_flagged", "duplicates")
+
+
+def vault_root() -> Path:
+    return Path(os.environ.get("LIFE_VAULT", Path.home() / "life"))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="lv-imessage")
+    parser.add_argument("--vault", default=str(vault_root()))
+    parser.add_argument("--db", default=str(ingest.default_db()))
+    parser.add_argument("--check", action="store_true",
+                        help="report only whether chat.db is readable; write nothing")
+    args = parser.parse_args()
+
+    vault = Path(args.vault)
+    db = Path(args.db)
+
+    if args.check:
+        ok, reason = ingest.probe_access(db)
+        print(f"access={'ok' if ok else 'blocked'} {reason}")
+        return 0 if ok else 1
+
+    if not vault.is_dir():
+        print(f"lv-imessage: refusing: vault not found: {vault}", file=sys.stderr)
+        return 1
+    try:
+        summary = ingest.ingest_from_db(vault, db)
+    except Exception as exc:  # noqa: BLE001 -- unattended: never a traceback
+        print(f"lv-imessage: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    if summary.get("error"):
+        print(f"lv-imessage: refusing: {summary['error']}", file=sys.stderr)
+        return 1
+
+    line = " ".join(f"{k}={summary.get(k, 0)}" for k in _FIELDS)
+    if "initialized" in summary:
+        line += f" initialized={summary['initialized']} (forward-only from here)"
+    print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

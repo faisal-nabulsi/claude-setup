@@ -1,0 +1,22 @@
+{
+  "id": "grade-posted",
+  "note": "Push me when a new grade (or a regrade) shows up on Gradescope or Canvas.",
+  "enabled": true,
+  "mode": "dry_run",
+  "every_minutes": 30,
+  "source": {
+    "kind": "grades",
+    "gradescope": true,
+    "canvas_courses": {
+      "1234567": "CS 101",
+      "2345678": "BIO 101"
+    },
+    "gs_course_map": {
+      "CS 101": "1234567"
+    }
+  },
+  "action": {
+    "kind": "push",
+    "title": "Grade posted"
+  }
+}

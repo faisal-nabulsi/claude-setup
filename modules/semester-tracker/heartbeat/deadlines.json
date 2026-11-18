@@ -1,0 +1,5 @@
+[
+  {"id": "d-example001", "when": "2026-09-15T23:59", "label": "CS 101 Homework 1 (example row)", "short": "CS101 HW1"},
+  {"id": "d-example002", "when": "2026-09-18T18:00", "label": "Read chapter 2 for BIO 101 (example soft target)", "soft": true},
+  {"id": "1234", "canvas_id": 1234, "when": "2026-10-01T23:59", "label": "BIO 101 Lab report (example Canvas row)"}
+]

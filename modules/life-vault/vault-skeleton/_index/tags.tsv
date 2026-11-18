@@ -1,0 +1,23 @@
+area/school	area	Education: classes, grades, applications, teachers
+area/work	area	Jobs, internships, employers, professional projects
+area/family	area	Immediate and extended family
+area/social	area	Friends, communities, relationships outside family
+area/health	area	Physical and mental health, fitness, medical
+area/finance	area	Money, accounts, income, spending, aid
+area/creative	area	Building, writing, side projects, art
+area/admin	area	Logistics, accounts, documents, bureaucracy
+area/legal	area	Legal matters, contracts, immigration, disputes
+type/fact	type	A stable attribute or state
+type/event	type	Something that happened on a date
+type/decision	type	A choice made, with reasoning
+type/preference	type	A like, dislike, or working style
+type/belief	type	A position the owner holds: what they argue, believe, or judge to be true (distinct from a taste)
+type/goal	type	Something intended for the future
+type/obligation	type	A commitment or deadline owed to someone
+type/relationship	type	How two entities relate
+type/credential	type	A qualification, account, or identifier (never the secret itself)
+conf/stated	conf	The owner said it directly
+conf/confirmed	conf	Claude said it and the owner agreed or acted on it
+conf/derived	conf	Claude asserted it; never confirmed
+sens/private	sens	Sensitive: health, finance, legal, relationship conflict. Never leaves the machine without confirmation
+sens/normal	sens	Explicitly not sensitive; safe to include in outbound content
